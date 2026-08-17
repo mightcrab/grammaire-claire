@@ -1,0 +1,10 @@
+{
+  "name": "Grammaire Claire — French A1 to B2",
+  "short_name": "Grammaire Claire",
+  "description": "A systematic, accurate, practice-led French grammar course from A1 to B2.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f2e9",
+  "theme_color": "#183039",
+  "lang": "en"
+}
