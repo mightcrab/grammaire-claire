@@ -1,4 +1,4 @@
-const CACHE = "grammaire-claire-shell-v2";
+const CACHE = "grammaire-claire-shell-v3";
 
 async function precacheShell() {
   const page = await fetch(new Request("/", { cache: "reload" }));
@@ -38,7 +38,12 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.origin !== self.location.origin) return;
+
+  // Progress is private, user-specific data. Let the browser send API requests
+  // straight to the authenticated worker and never place them in the shell cache.
+  if (url.pathname.startsWith("/api/")) return;
 
   event.respondWith((async () => {
     const cached = await caches.match(request);

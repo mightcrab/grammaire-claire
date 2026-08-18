@@ -13,7 +13,7 @@ editorial methodology.
 - Foundation → A1 → A2 → B1 → B2 prerequisite links
 - Today, Learn, Practice, Reference, Progress, and Quality views
 - browser-based French audio where a compatible voice is available
-- device-local progress, spaced-review dates, and JSON backup/restore
+- private account sync, offline device storage, and JSON backup/restore
 - responsive keyboard-, touch-, and screen-reader-friendly interface
 
 Passé simple and passé antérieur are explicitly marked as recognition-only at
@@ -42,6 +42,24 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
+The local app remains fully usable and keeps progress in that browser. Automatic
+cross-device sync is enabled on the private hosted version, where the platform
+supplies the signed-in identity and the `DB` database binding.
+
+## Progress privacy and recovery
+
+- every answer is written to the current device before network sync begins
+- hosted progress is keyed by the platform's private, opaque user identifier
+- a fresh hosted session confirms the signed-in owner before opening an account
+  cache; work done before confirmation stays in an unowned draft and requires an
+  explicit keep-or-discard choice when connectivity returns
+- the offline service worker never caches `/api/` responses
+- revision checks and idempotent mutation IDs prevent silent overwrites/replays
+- reset and import operations use replacement epochs; ambiguous offline conflicts
+  require an explicit choice and automatically export a safety backup
+- course source code and the database schema may live in GitHub, but learner
+  progress is stored in the private hosted database, not in the repository
+
 ## Verify
 
 ```bash
@@ -50,5 +68,6 @@ npm run lint
 npm test
 ```
 
-Progress is stored in the browser rather than in an account. Export a backup
-from the Progress screen before clearing browser data or moving devices.
+The Progress screen always shows whether the latest device copy is synced,
+offline, or waiting for a conflict decision. A readable export remains available
+as an independent backup.

@@ -50,5 +50,18 @@ test("pre-caches the rendered application shell for a complete offline fallback"
   assert.match(serviceWorker, /event\.waitUntil\(precacheShell\(\)/);
   assert.match(serviceWorker, /event\.waitUntil\(caches\.open\(CACHE\)/);
   assert.match(serviceWorker, /request\.mode === "navigate"/);
+  assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/);
   assert.match(serviceWorker, /await caches\.match\("\/"\)/);
+});
+
+test("packages progress storage as additive database migrations", async () => {
+  const [hosting, initial, receipts] = await Promise.all([
+    readFile(new URL("../dist/.openai/hosting.json", import.meta.url), "utf8"),
+    readFile(new URL("../dist/.openai/drizzle/0000_progress_sync.sql", import.meta.url), "utf8"),
+    readFile(new URL("../dist/.openai/drizzle/0001_progress_mutations.sql", import.meta.url), "utf8"),
+  ]);
+  assert.equal(JSON.parse(hosting).d1, "DB");
+  assert.match(initial, /CREATE TABLE `progress_sync`/);
+  assert.doesNotMatch(initial, /progress_mutations/);
+  assert.match(receipts, /CREATE TABLE `progress_mutations`/);
 });

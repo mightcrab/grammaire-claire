@@ -3,65 +3,13 @@
 import { ChangeEvent, RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { courseMethodology, courseSources, lessons, levelMeta } from "./courseData";
 import type { Lesson, Level } from "./courseTypes";
+import { parseProgressPayload, type Progress, type RecordState } from "./progressData";
+import { syncStatusLabel, useProgressSync, type ProgressConflict, type SyncStatus } from "./useProgressSync";
 
 type View = "today" | "learn" | "practice" | "reference" | "progress" | "quality";
-type RecordState = { completed?: boolean; strength: number; attempts: number; correct: number; nextReview?: string; lastStudied?: string };
-type Progress = Record<string, RecordState>;
-type ProgressPayload = { progress: Progress; generation: string };
 
-const storageKey = "grammaire-claire-progress-v1";
-const generationKey = "grammaire-claire-progress-generation-v1";
-const initialGeneration = "1970-01-01T00:00:00.000Z";
 const levels: Level[] = ["Foundation", "A1", "A2", "B1", "B2"];
 const intervals = [1, 3, 7, 14, 30, 60, 90];
-const lessonIds = new Set(lessons.map((lesson) => lesson.id));
-
-function validDate(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
-}
-
-function validateProgress(value: unknown): Progress | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const result: Progress = {};
-  for (const [id, raw] of Object.entries(value)) {
-    if (!lessonIds.has(id) || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const item = raw as Partial<RecordState>;
-    if (!Number.isInteger(item.strength) || item.strength! < 0 || item.strength! > 7) return null;
-    if (!Number.isInteger(item.attempts) || item.attempts! < 0) return null;
-    if (!Number.isInteger(item.correct) || item.correct! < 0 || item.correct! > item.attempts!) return null;
-    if (item.completed !== undefined && typeof item.completed !== "boolean") return null;
-    if (item.nextReview !== undefined && !validDate(item.nextReview)) return null;
-    if (item.lastStudied !== undefined && !validDate(item.lastStudied)) return null;
-    result[id] = item as RecordState;
-  }
-  return result;
-}
-
-function parseProgressPayload(value: unknown): ProgressPayload | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const payload = value as { version?: unknown; progress?: unknown; generation?: unknown; updatedAt?: unknown; exportedAt?: unknown };
-  if (payload.version !== 1) return null;
-  if (payload.generation !== undefined && !validDate(payload.generation)) return null;
-  if (payload.updatedAt !== undefined && !validDate(payload.updatedAt)) return null;
-  if (payload.exportedAt !== undefined && !validDate(payload.exportedAt)) return null;
-  const progress = validateProgress(payload.progress);
-  return progress ? { progress, generation: payload.generation ?? initialGeneration } : null;
-}
-
-function mergeProgress(current: Progress, incoming: Progress): Progress {
-  let changed = false;
-  const merged = { ...current };
-  for (const [id, next] of Object.entries(incoming)) {
-    const previous = current[id];
-    const previousTime = previous?.lastStudied ? Date.parse(previous.lastStudied) : -1;
-    const nextTime = next.lastStudied ? Date.parse(next.lastStudied) : -1;
-    if (!previous || nextTime > previousTime || (nextTime === previousTime && next.attempts > previous.attempts)) {
-      merged[id] = next;
-      changed = true;
-    }
-  }
-  return changed ? merged : current;
-}
 
 function scrollToTop() {
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -72,11 +20,6 @@ function futureDate(days: number) {
   const result = new Date();
   result.setDate(result.getDate() + days);
   return result.toISOString();
-}
-
-function nextGeneration(current: string) {
-  const now = new Date().toISOString();
-  return now > current ? now : new Date(Date.parse(current) + 1).toISOString();
 }
 
 function lessonStatus(record?: RecordState) {
@@ -95,77 +38,23 @@ export function GrammarApp() {
   const [view, setView] = useState<View>("today");
   const [level, setLevel] = useState<Level>("Foundation");
   const [lessonId, setLessonId] = useState<string | null>(null);
-  const [progress, setProgress] = useState<Progress>({});
-  const [generation, setGeneration] = useState(initialGeneration);
-  const [ready, setReady] = useState(false);
+  const {
+    progress,
+    status: syncStatus,
+    conflict: progressConflict,
+    updateProgress,
+    replaceProgress,
+    retrySync,
+    adoptSyncedCopy,
+    keepDeviceCopy,
+  } = useProgressSync();
   const [now, setNow] = useState(0);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
-  const generationRef = useRef(initialGeneration);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      try {
-        const stored = localStorage.getItem(storageKey);
-        const storedGeneration = localStorage.getItem(generationKey);
-        const authoritativeGeneration = validDate(storedGeneration) ? storedGeneration : initialGeneration;
-        generationRef.current = authoritativeGeneration;
-        setGeneration(authoritativeGeneration);
-        if (stored) {
-          const json = JSON.parse(stored);
-          const parsed = parseProgressPayload(json);
-          const legacy = parsed ? null : validateProgress(json);
-          const loaded = parsed ?? (legacy ? { progress: legacy, generation: initialGeneration } : null);
-          if (loaded && loaded.generation >= authoritativeGeneration) {
-            setProgress(loaded.progress);
-            generationRef.current = loaded.generation;
-            setGeneration(loaded.generation);
-          }
-        }
-      } catch { /* Ignore a damaged device-local record. */ }
-      setReady(true);
-      setNow(Date.now());
-    }, 0);
+    const timer = window.setTimeout(() => setNow(Date.now()), 0);
     return () => window.clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    try {
-      const storedGeneration = localStorage.getItem(generationKey);
-      if (validDate(storedGeneration) && storedGeneration > generation) {
-        const stored = localStorage.getItem(storageKey);
-        let parsed: ProgressPayload | null = null;
-        try { parsed = stored ? parseProgressPayload(JSON.parse(stored)) : null; } catch { /* Treat a damaged stale payload as empty. */ }
-        generationRef.current = storedGeneration;
-        const timer = window.setTimeout(() => {
-          setGeneration(storedGeneration);
-          setProgress(parsed?.generation === storedGeneration ? parsed.progress : {});
-        }, 0);
-        return () => window.clearTimeout(timer);
-      }
-      localStorage.setItem(generationKey, generation);
-      localStorage.setItem(storageKey, JSON.stringify({ version: 1, generation, updatedAt: new Date().toISOString(), progress }));
-    } catch { /* The course remains usable if browser storage is unavailable. */ }
-  }, [generation, progress, ready]);
-
-  useEffect(() => {
-    const synchronize = (event: StorageEvent) => {
-      if (event.key !== storageKey || !event.newValue) return;
-      try {
-        const incoming = parseProgressPayload(JSON.parse(event.newValue));
-        if (!incoming || incoming.generation < generationRef.current) return;
-        if (incoming.generation > generationRef.current) {
-          generationRef.current = incoming.generation;
-          setGeneration(incoming.generation);
-          setProgress(incoming.progress);
-          return;
-        }
-        setProgress((current) => mergeProgress(current, incoming.progress));
-      } catch { /* Ignore malformed writes from another tab. */ }
-    };
-    window.addEventListener("storage", synchronize);
-    return () => window.removeEventListener("storage", synchronize);
   }, []);
 
   useEffect(() => {
@@ -235,7 +124,7 @@ export function GrammarApp() {
   }
 
   function answerLesson(id: string, isCorrect: boolean, scheduledReview = false, expectedReview?: string) {
-    setProgress((current) => {
+    updateProgress((current) => {
       const previous = current[id] ?? { strength: 0, attempts: 0, correct: 0 };
       const earnsScheduledCredit = scheduledReview && Boolean(expectedReview) && previous.nextReview === expectedReview && Date.parse(expectedReview!) <= Date.now();
       const strength = earnsScheduledCredit ? (isCorrect ? Math.min(7, previous.strength + 1) : Math.max(0, previous.strength - 1)) : previous.strength;
@@ -245,7 +134,7 @@ export function GrammarApp() {
   }
 
   function completeLesson(id: string) {
-    setProgress((current) => {
+    updateProgress((current) => {
       const previous = current[id] ?? { strength: 0, attempts: 0, correct: 0 };
       return { ...current, [id]: { ...previous, completed: true, nextReview: previous.nextReview ?? futureDate(1), lastStudied: new Date().toISOString() } };
     });
@@ -279,12 +168,9 @@ export function GrammarApp() {
         const parsed = JSON.parse(String(reader.result));
         const imported = parseProgressPayload(parsed);
         if (!imported) throw new Error();
-        if (!confirm("Import this backup and replace the current progress on this device? A safety export will download first.")) return;
+        if (!confirm("Import this backup and replace the synced progress on all your devices? A safety export will download first.")) return;
         exportProgress();
-        const replacement = nextGeneration(generationRef.current);
-        generationRef.current = replacement;
-        setGeneration(replacement);
-        setProgress(imported.progress);
+        replaceProgress(imported.progress);
       } catch { alert("That file is not a valid Grammaire Claire backup."); }
     };
     reader.readAsText(file);
@@ -293,7 +179,7 @@ export function GrammarApp() {
 
   return (
     <main className="app-shell">
-      <Sidebar view={view} due={due.length} completed={completed} onView={changeView} />
+      <Sidebar view={view} due={due.length} completed={completed} syncStatus={syncStatus} onView={changeView} />
       <section className="workspace">
         <Topbar view={view} onSearch={() => { changeView("reference"); setTimeout(() => searchRef.current?.focus(), 20); }} />
         {view === "today" && <Today now={now} next={next} due={due} progress={progress} completed={completed} stable={stable} onLesson={openLesson} onView={changeView} onLevel={openLevel} />}
@@ -301,7 +187,7 @@ export function GrammarApp() {
         {view === "learn" && selected && <LessonPage key={selected.id} lesson={selected} progress={progress} onBack={() => closeLesson(selected.id)} onLesson={openLesson} onAnswer={answerLesson} onComplete={completeLesson} onSpeak={speak} />}
         {view === "practice" && <Practice due={due} progress={progress} onAnswer={answerLesson} onLesson={openLesson} />}
         {view === "reference" && <Reference query={query} setQuery={setQuery} searchRef={searchRef} onLesson={openLesson} />}
-        {view === "progress" && <ProgressPage progress={progress} completed={completed} stable={stable} due={due.length} onExport={exportProgress} onImport={importProgress} onReset={() => { if (confirm("Reset all progress on this device? Export a backup first if you may want it later.")) { const replacement = nextGeneration(generationRef.current); generationRef.current = replacement; setGeneration(replacement); setProgress({}); } }} />}
+        {view === "progress" && <ProgressPage progress={progress} completed={completed} stable={stable} due={due.length} syncStatus={syncStatus} conflict={progressConflict} onExport={exportProgress} onImport={importProgress} onRetrySync={retrySync} onUseSyncedCopy={() => { exportProgress(); adoptSyncedCopy(); }} onKeepDeviceCopy={() => { exportProgress(); keepDeviceCopy(); }} onReset={() => { if (confirm("Reset synced progress on all your devices? Export a backup first if you may want it later.")) replaceProgress({}); }} />}
         {view === "quality" && <Quality onLesson={openLesson} />}
       </section>
       <MobileNav view={view} due={due.length} onView={changeView} />
@@ -309,13 +195,13 @@ export function GrammarApp() {
   );
 }
 
-function Sidebar({ view, due, completed, onView }: { view: View; due: number; completed: number; onView: (view: View) => void }) {
+function Sidebar({ view, due, completed, syncStatus, onView }: { view: View; due: number; completed: number; syncStatus: SyncStatus; onView: (view: View) => void }) {
   const items: [View, string, string][] = [["today", "⌂", "Today"], ["learn", "◫", "Learn"], ["practice", "✎", "Practice"], ["reference", "⌕", "Reference"], ["progress", "↗", "Progress"]];
   return <aside className="sidebar">
     <button className="brand brand-button" onClick={() => onView("today")}><span className="brand-mark">ç</span><span className="brand-copy"><strong>Grammaire Claire</strong><small>French, step by step</small></span></button>
     <nav className="primary-nav" aria-label="Primary navigation">{items.map(([key, icon, name]) => <button key={key} className={view === key ? "active" : ""} onClick={() => onView(key)} aria-current={view === key ? "page" : undefined}><span className="nav-icon">{icon}</span><span>{name}</span>{key === "practice" && due > 0 && <b className="nav-count">{due}</b>}</button>)}</nav>
     <button className={`quality-link ${view === "quality" ? "active" : ""}`} onClick={() => onView("quality")}><span>✓</span><span>Quality &amp; sources</span></button>
-    <div className="sidebar-note"><span className="eyebrow light">Course coverage</span><strong>{completed} of {lessons.length} lessons</strong><div className="mini-progress"><i style={{ width: `${(completed / lessons.length) * 100}%` }} /></div><small>Saved on this device</small></div>
+    <div className="sidebar-note"><span className="eyebrow light">Course coverage</span><strong>{completed} of {lessons.length} lessons</strong><div className="mini-progress"><i style={{ width: `${(completed / lessons.length) * 100}%` }} /></div><small className={`sync-label sync-${syncStatus}`} role="status" aria-live="polite">{syncStatusLabel(syncStatus)}</small></div>
   </aside>;
 }
 
@@ -404,9 +290,43 @@ function Reference({ query, setQuery, searchRef, onLesson }: { query: string; se
   return <div className="reference-layout"><section><div className="search-box"><span>⌕</span><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Try ‘subjunctive’, ‘depuis’, ‘object pronouns’…" aria-label="Search grammar"/><kbd>⌘ K</kbd></div><div className="filter-row"><button className={filter === "All" ? "active" : ""} onClick={() => setFilter("All")}>All</button>{levels.map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><p className="result-count">{results.length} entries</p><div className="reference-results">{results.map((lesson) => <button key={lesson.id} onClick={() => onLesson(lesson)}><span className={`level-badge level-${lesson.level.toLowerCase()}`}>{lesson.level}</span><div><strong>{lesson.title}</strong><p>{lesson.summary}</p><small lang="fr">{lesson.examples[0].fr}</small></div><span>›</span></button>)}</div>{!results.length && <div className="empty-state"><strong>No exact match</strong><p>Try a broader English or French grammar term.</p></div>}</section><aside className="reference-index"><span className="eyebrow">Quick index</span>{["articles", "verbs", "pronouns", "negation", "subjunctive", "hypotheses", "register"].map((tag) => <button key={tag} onClick={() => setQuery(tag)}>{tag}<span>→</span></button>)}<div className="reference-note"><strong>CEFR-aligned, not certification</strong><p>CEFR describes communicative ability rather than prescribing one official grammar list.</p></div></aside></div>;
 }
 
-function ProgressPage({ progress, completed, stable, due, onExport, onImport, onReset }: { progress: Progress; completed: number; stable: number; due: number; onExport: () => void; onImport: (event: ChangeEvent<HTMLInputElement>) => void; onReset: () => void }) {
-  const attempts = Object.values(progress).reduce((sum, item) => sum + item.attempts, 0); const correct = Object.values(progress).reduce((sum, item) => sum + item.correct, 0);
-  return <div className="progress-layout"><section className="progress-summary"><article><span>Course coverage</span><strong>{Math.round(completed / lessons.length * 100)}%</strong><small>{completed} of {lessons.length} lessons</small></article><article><span>Stable recall</span><strong>{stable}</strong><small>across separated reviews</small></article><article><span>Practice accuracy</span><strong>{attempts ? `${Math.round(correct / attempts * 100)}%` : "—"}</strong><small>{attempts || "No"} checked answers</small></article><article><span>Review queue</span><strong>{due}</strong><small>due now</small></article></section><section className="progress-panel"><div className="section-heading"><div><span className="eyebrow">Coverage by level</span><h2>What you have completed</h2></div></div><div className="level-progress-list">{levels.map((item) => { const total = lessons.filter((lesson) => lesson.level === item).length; const count = lessons.filter((lesson) => lesson.level === item && progress[lesson.id]?.completed).length; const percent = percentFor(item, progress); return <div key={item}><span className={`level-badge level-${item.toLowerCase()}`}>{item}</span><div><strong>{levelMeta[item].short}</strong><div className="progress-track"><i style={{ width: `${percent}%` }}/></div></div><span>{count}/{total}</span><b>{percent}%</b></div>; })}</div></section><section className="data-panel"><div><span className="eyebrow">Your data</span><h2>Private and portable</h2><p>Progress stays in this browser. Export a readable backup before clearing browser data or changing devices.</p></div><div className="data-actions"><button onClick={onExport}>Export backup</button><input className="backup-input" aria-label="Import progress backup" title="Import backup" type="file" accept="application/json" onChange={onImport}/><button className="danger-button" onClick={onReset}>Reset progress</button></div></section></div>;
+function ProgressPage({
+  progress,
+  completed,
+  stable,
+  due,
+  syncStatus,
+  conflict,
+  onExport,
+  onImport,
+  onReset,
+  onRetrySync,
+  onUseSyncedCopy,
+  onKeepDeviceCopy,
+}: {
+  progress: Progress;
+  completed: number;
+  stable: number;
+  due: number;
+  syncStatus: SyncStatus;
+  conflict: ProgressConflict | null;
+  onExport: () => void;
+  onImport: (event: ChangeEvent<HTMLInputElement>) => void;
+  onReset: () => void;
+  onRetrySync: () => void;
+  onUseSyncedCopy: () => void;
+  onKeepDeviceCopy: () => void;
+}) {
+  const attempts = Object.values(progress).reduce((sum, item) => sum + item.attempts, 0);
+  const correct = Object.values(progress).reduce((sum, item) => sum + item.correct, 0);
+  const canRetry = syncStatus === "offline" || syncStatus === "error" || syncStatus === "sign-in";
+  const legacyChoice = conflict?.reason === "legacy-unowned";
+  return <div className="progress-layout">
+    <section className="progress-summary"><article><span>Course coverage</span><strong>{Math.round(completed / lessons.length * 100)}%</strong><small>{completed} of {lessons.length} lessons</small></article><article><span>Stable recall</span><strong>{stable}</strong><small>across separated reviews</small></article><article><span>Practice accuracy</span><strong>{attempts ? `${Math.round(correct / attempts * 100)}%` : "—"}</strong><small>{attempts || "No"} checked answers</small></article><article><span>Review queue</span><strong>{due}</strong><small>due now</small></article></section>
+    <section className="progress-panel"><div className="section-heading"><div><span className="eyebrow">Coverage by level</span><h2>What you have completed</h2></div></div><div className="level-progress-list">{levels.map((item) => { const total = lessons.filter((lesson) => lesson.level === item).length; const count = lessons.filter((lesson) => lesson.level === item && progress[lesson.id]?.completed).length; const percent = percentFor(item, progress); return <div key={item}><span className={`level-badge level-${item.toLowerCase()}`}>{item}</span><div><strong>{levelMeta[item].short}</strong><div className="progress-track"><i style={{ width: `${percent}%` }}/></div></div><span>{count}/{total}</span><b>{percent}%</b></div>; })}</div></section>
+    {conflict && <section className="sync-conflict-panel" role="alert"><div><span className="eyebrow">Sync choice needed</span><h2>{legacyChoice ? "Local progress from the earlier version was found." : "Two replacement copies cannot be safely combined."}</h2><p>{legacyChoice ? "Choose whether to add this device's existing progress to the signed-in account or use the account's synced copy." : "Your device copy is still saved locally. Choose which copy should become the private synced version."} A safety backup downloads before either choice.</p></div><div className="conflict-actions"><button onClick={onKeepDeviceCopy}>Keep this device</button><button onClick={onUseSyncedCopy}>Use synced copy</button></div></section>}
+    <section className="data-panel"><div><span className="eyebrow">Your data</span><h2>Private, synced and portable</h2><p>Your signed-in progress is privately synced across devices and also kept locally for offline study. Export a readable backup whenever you want an independent copy.</p><div className={`sync-state sync-${syncStatus}`} role="status" aria-live="polite"><span>{syncStatusLabel(syncStatus)}</span>{canRetry && <button className="text-button" onClick={onRetrySync}>Try again</button>}</div></div><div className="data-actions"><button onClick={onExport}>Export backup</button><input className="backup-input" aria-label="Import progress backup" title="Import backup" type="file" accept="application/json" onChange={onImport}/><button className="danger-button" onClick={onReset}>Reset progress</button></div></section>
+  </div>;
 }
 
 function Quality({ onLesson }: { onLesson: (lesson: Lesson) => void }) {

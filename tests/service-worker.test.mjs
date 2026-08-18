@@ -59,6 +59,14 @@ test("the installed service worker can recover the whole shell while offline", a
   const code = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
   vm.runInContext(code, context);
 
+  let apiWasIntercepted = false;
+  listeners.get("fetch")({
+    request: { method: "GET", mode: "cors", url: `${origin}/api/progress` },
+    respondWith() { apiWasIntercepted = true; },
+    waitUntil() {},
+  });
+  assert.equal(apiWasIntercepted, false, "private API responses must never enter the offline cache");
+
   let installWork;
   listeners.get("install")({ waitUntil(promise) { installWork = promise; } });
   await installWork;
